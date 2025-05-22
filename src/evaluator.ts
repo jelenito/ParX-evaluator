@@ -1,42 +1,60 @@
 import { runSelectQuery } from './sparqlClient';
 import { OM, PARX, DINEN61360, RDF } from './namespaces';
 import { evaluate } from 'mathjs';
+import { Node, Literal, NamedNode } from 'rdflib';
 
 /**
  * Evaluiert rekursiv eine om:Application per SPARQL.
- * @param formulaUri URI der  Interdependency Formel
+ * @param processUri URI des Prozessoperators
+ * @param outputDEUri URI des Datenmerkmals (DataElement)
  * @param endpoint GraphDB-Endpunkt
  * @returns Ergebniswert und ausgewerteter Ausdruck
  */
+export async function evaluateFormulaByProcess(processUri: string, outputDEUri: string, endpoint: string): Promise<{ expression: string, result: number }> {
+  const formulaUri = await findFormulaUri(processUri, outputDEUri, endpoint);
+  return evaluateFormula(formulaUri, endpoint);
+}
+
+async function findFormulaUri(processUri: string, dataElementUri: string, endpoint: string): Promise<string> {
+  const query = `
+PREFIX parx: <${PARX('').value}>
+PREFIX om: <${OM('').value}>
+PREFIX rdf: <${RDF('').value}>
+SELECT ?formula WHERE {
+  <${processUri}> parx:hasInterdependency ?formula .
+  ?formula om:arguments ?argList .
+  ?argList rdf:first ?lhs .
+  ?lhs a om:Variable .
+  ?de parx:isDataFor ?lhs .
+  FILTER(str(?de) = "${dataElementUri}")
+} LIMIT 1`;
+
+  const res = await runSelectQuery(query, endpoint);
+  if (res.results.bindings.length === 0) {
+    throw new Error('No formula found for the given request.');
+  }
+  return res.results.bindings[0].formula.value;
+}
+
 export async function evaluateFormula(formulaUri: string, endpoint: string): Promise<{ expression: string, result: number }> {
   const { expression, variables } = await buildExpression(formulaUri, endpoint);
 
-  // Ersetze Variablennamen durch ihre konkreten Werte
   const exprWithValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => {
     if (variables[name] !== undefined) return variables[name].toString();
-    throw new Error(`Fehlender Wert für Variable: ${name}`);
+    throw new Error(`Missing value for: ${name}`);
   });
 
   const result = evaluate(exprWithValues);
-
-  return {
-    expression: exprWithValues,
-    result
-  };
+  return { expression: exprWithValues, result };
 }
 
-/**
- * Rekonstruiert rekursiv den math.js-Ausdruck und sammelt Variablenwerte.
- */
 async function buildExpression(nodeUri: string, endpoint: string): Promise<{ expression: string, variables: Record<string, number> }> {
   const operatorQuery = `
 PREFIX om: <${OM('').value}>
-SELECT ?op WHERE { <${nodeUri}> om:operator ?op } LIMIT 1
-  `;
+SELECT ?op WHERE { <${nodeUri}> om:operator ?op } LIMIT 1`;
   const opResult = await runSelectQuery(operatorQuery, endpoint);
   const operatorUri = opResult.results.bindings[0].op.value;
 
-  // Sonderfall: Gleichung
   if (operatorUri.endsWith('#eq')) {
     const rhsQuery = `
 PREFIX om: <${OM('').value}>
@@ -51,24 +69,26 @@ SELECT ?rhs WHERE {
     return await buildExpression(rhsNode, endpoint);
   }
 
-  // Argumente geordnet abfragen ohne Blank Node Referenz
-  const argUris = await getArgumentsViaPathQuery(nodeUri, endpoint);
+  const argNodes = await getArgumentsViaPathQuery(nodeUri, endpoint);
   const variables: Record<string, number> = {};
   const argsByOrder: string[] = [];
   const expressionCache = new Set<string>();
 
-  for (const arg of argUris) {
-    if (/^\".+\"\^\^xsd:double$/.test(arg)) {
-      const match = arg.match(/^\"(.+)\"\^\^xsd:double$/);
-      if (match) {
-        argsByOrder.push(match[1]);
-        continue;
-      }
+  for (const arg of argNodes) {
+    if (arg.termType === 'Literal') {
+      argsByOrder.push((arg as Literal).value);
+      continue;
     }
+
+    if (arg.termType !== 'NamedNode') {
+      throw new Error(`not supported Node-Type: ${arg.termType}`);
+    }
+
+    const argUri = (arg as NamedNode).value;
 
     const typeQuery = `
 PREFIX om: <${OM('').value}>
-SELECT ?type WHERE { <${arg}> a ?type }`;
+SELECT ?type WHERE { <${argUri}> a ?type }`;
     const typeRes = await runSelectQuery(typeQuery, endpoint);
     const types = typeRes.results.bindings.map((b: any) => b.type.value);
 
@@ -79,9 +99,9 @@ PREFIX din: <${DINEN61360('').value}>
 PREFIX om: <${OM('').value}>
 
 SELECT ?val ?varname WHERE {
-  <${arg}> a om:Variable .
-  BIND(REPLACE(STR(<${arg}>), ".*[#/](.+)$", "$1") AS ?varname)
-  ?de parx:isDataFor <${arg}> ;
+  <${argUri}> a om:Variable .
+  BIND(REPLACE(STR(<${argUri}>), ".*[#/](.+)$", "$1") AS ?varname)
+  ?de parx:isDataFor <${argUri}> ;
       din:hasInstanceDescription ?desc .
   ?desc din:value ?val .
 } LIMIT 1`;
@@ -94,7 +114,7 @@ SELECT ?val ?varname WHERE {
         continue;
       }
     } else if (types.includes(OM('Application').value)) {
-      const nested = await buildExpression(arg, endpoint);
+      const nested = await buildExpression(argUri, endpoint);
       Object.assign(variables, nested.variables);
       if (!expressionCache.has(nested.expression)) {
         argsByOrder.push(`(${nested.expression})`);
@@ -103,7 +123,7 @@ SELECT ?val ?varname WHERE {
       continue;
     }
 
-    throw new Error(`Unbekannter Argumenttyp für: ${arg}`);
+    throw new Error(`Not known argument type: ${argUri}`);
   }
 
   const op = operatorToSymbol(operatorUri);
@@ -114,10 +134,7 @@ SELECT ?val ?varname WHERE {
   return { expression, variables };
 }
 
-/**
- * Holt Argumente einer RDF-Liste über rdf:rest* /rdf:first in Reihenfolge
- */
-async function getArgumentsViaPathQuery(nodeUri: string, endpoint: string): Promise<string[]> {
+async function getArgumentsViaPathQuery(nodeUri: string, endpoint: string): Promise<Node[]> {
   const query = `
 PREFIX om: <${OM('').value}>
 PREFIX rdf: <${RDF('').value}>
@@ -127,7 +144,11 @@ SELECT ?arg WHERE {
 }`;
 
   const res = await runSelectQuery(query, endpoint);
-  return res.results.bindings.map((b: any) => b.arg.value);
+  return res.results.bindings.map((b: any) => {
+    return b.arg.type === 'literal'
+      ? { termType: 'Literal', value: b.arg.value } as Literal
+      : { termType: 'NamedNode', value: b.arg.value } as NamedNode;
+  });
 }
 
 const operatorMap: Record<string, string> = {
@@ -142,7 +163,7 @@ const operatorMap: Record<string, string> = {
 
 function operatorToSymbol(uri: string): string {
   const op = operatorMap[uri];
-  if (!op) throw new Error(`Nicht unterstützter Operator: ${uri}`);
+  if (!op) throw new Error(`Not supported operator: ${uri}`);
   return op;
 }
 
