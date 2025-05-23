@@ -95,15 +95,15 @@ SELECT ?type WHERE { <${argUri}> a ?type }`;
     if (types.includes(OM('Variable').value) && !types.includes(OM('Application').value)) {
       const valueQuery = `
 PREFIX parx: <${PARX('').value}>
-PREFIX din: <${DINEN61360('').value}>
+PREFIX din61360: <${DINEN61360('').value}>
 PREFIX om: <${OM('').value}>
 
 SELECT ?val ?varname WHERE {
   <${argUri}> a om:Variable .
   BIND(REPLACE(STR(<${argUri}>), ".*[#/](.+)$", "$1") AS ?varname)
   ?de parx:isDataFor <${argUri}> ;
-      din:hasInstanceDescription ?desc .
-  ?desc din:value ?val .
+      din61360:hasInstanceDescription ?desc .
+  ?desc din61360:value ?val .
 } LIMIT 1`;
 
       const valRes = await runSelectQuery(valueQuery, endpoint);
