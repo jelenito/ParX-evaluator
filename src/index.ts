@@ -9,7 +9,7 @@ async function main() {
   const [,, repo, processUri, outputDataElement] = process.argv;
 
   if (!repo || !processUri || !outputDataElement) {
-    console.error(`❌ Fehlende Argumente!
+    console.error(` Fehlende Argumente!
 
 Verwendung:
   npx ts-node src/index.ts <REPOSITORY_NAME> <PROCESS_URI> <DATA_ELEMENT_URI>
@@ -29,18 +29,18 @@ Beispiel:
     const formulaUri = await findFormulaForOutput(processUri, outputDataElement, endpoint);
 
     if (!formulaUri) {
-      console.error('❌ No formula found for the given process and data element.');
+      console.error(' No formula found for the given process and data element.');
       return;
     }
 
-    console.log('✅ Interdependency formula found:', formulaUri);
+    console.log('Interdependency formula found:', formulaUri);
 
     const result = await evaluateFormula(formulaUri, endpoint);
 
-    console.log('🧮 Evaluated Expression:', result.expression);
-    console.log('📐 Evaluation-Result:', result.result);
+    console.log('Evaluated Expression:', result.expression);
+    console.log('Calculation-Result:', result.result);
   } catch (e) {
-    console.error('❌ Error:', e);
+    console.error(' Error:', e);
   }
   console.log(`
     ██████╗   ██╗  ██╗
