@@ -4,12 +4,15 @@ import { evaluate } from 'mathjs';
 import { Node, Literal, NamedNode } from 'rdflib';
 
 /**
- * Evaluiert rekursiv eine om:Application per SPARQL.
- * @param processUri URI des Prozessoperators
- * @param outputDEUri URI des Datenmerkmals (DataElement)
- * @param endpoint GraphDB-Endpunkt
+ * Evaluates a formula by finding the corresponding process operator and data element.
+ * @param processUri URI of process operator
+ * @param outputDEUri URI of data element
+ * @param endpoint SPARQL-Endpoint
  * @returns Ergebniswert und ausgewerteter Ausdruck
  */
+
+const valueCache: Record<string, number> = {};
+
 export async function evaluateFormulaByProcess(processUri: string, outputDEUri: string, endpoint: string): Promise<{ expression: string, result: number }> {
   const formulaUri = await findFormulaUri(processUri, outputDEUri, endpoint);
   return evaluateFormula(formulaUri, endpoint);
