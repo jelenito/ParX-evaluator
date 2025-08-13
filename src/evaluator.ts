@@ -105,8 +105,8 @@ SELECT ?val ?varname WHERE {
   <${argUri}> a om:Variable .
   BIND(REPLACE(STR(<${argUri}>), ".*[#/](.+)$", "$1") AS ?varname)
   ?de parx:isDataFor <${argUri}> ;
-      din61360:hasInstanceDescription ?desc .
-  ?desc din61360:value ?val .
+      din61360:has_Instance_Description ?desc .
+  ?desc din61360:Value ?val .
 } LIMIT 1`;
 
       const valRes = await runSelectQuery(valueQuery, endpoint);
