@@ -2,11 +2,11 @@ import { runSelectQuery } from './sparqlClient';
 import { PARX, VDI3682, OM } from './namespaces';
 
 /**
- * Findet die URI einer Formel (om:Application), die im angegebenen Prozess das angegebene Ziel-DataElement beschreibt.
- * @param processUri URI des vdi3682:ProcessOperator
- * @param dataElementUri URI des dinen:DataElement (gewünschtes Ergebnis)
- * @param endpoint GraphDB-Endpunkt
- * @returns URI der Formel (als string), oder null wenn nicht gefunden
+ * Finds the formula for a given process operator and data element.
+ * @param processUri URI of a vdi3682:ProcessOperator
+ * @param dataElementUri URI of the parameter data element
+ * @param endpoint GraphDB endpoint URL
+ * @returns   URI of the formula or null if not found
  */
 export async function findFormulaForOutput(
   processUri: string,
