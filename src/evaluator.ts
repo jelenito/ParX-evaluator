@@ -11,6 +11,18 @@ import { Node, Literal, NamedNode } from 'rdflib';
  * @returns Result of the evaluation
  */
 
+
+
+function asSparqlTerm(id: string): string {
+  if (!id) return id;
+
+  if (id.startsWith('<') || id.startsWith('_:')) return id;
+
+  if (id.startsWith('http://') || id.startsWith('https://')) return `<${id}>`;
+  return id;
+}
+
+
 // try to get the value of a variable directly (provided by a data element).
 async function tryGetVariableValue(varIri: string, endpoint: string): Promise<number | null> {
   const q = `
@@ -118,7 +130,7 @@ export async function evaluateFormula(formulaUri: string, endpoint: string): Pro
 async function buildExpression(nodeUri: string, endpoint: string): Promise<{ expression: string, variables: Record<string, number> }> {
   const operatorQuery = `
 PREFIX om: <${OM('').value}>
-SELECT ?op WHERE { <${nodeUri}> om:operator ?op } LIMIT 1`;
+SELECT ?op WHERE { ${asSparqlTerm(nodeUri)} om:operator ?op } LIMIT 1`;
   const opResult = await runSelectQuery(operatorQuery, endpoint);
   const operatorUri = opResult.results.bindings[0].op.value;
 
@@ -127,12 +139,13 @@ SELECT ?op WHERE { <${nodeUri}> om:operator ?op } LIMIT 1`;
 PREFIX om: <${OM('').value}>
 PREFIX rdf: <${RDF('').value}>
 SELECT ?rhs WHERE {
-  <${nodeUri}> om:arguments ?list .
+   ${asSparqlTerm(nodeUri)} om:arguments ?list .
   ?list rdf:rest ?tail .
   ?tail rdf:first ?rhs .
 }`;
     const rhsResult = await runSelectQuery(rhsQuery, endpoint);
-    const rhsNode = rhsResult.results.bindings[0].rhs.value;
+    const b = rhsResult.results.bindings[0].rhs;
+    const rhsNode = b.type === 'bnode' ? `_:${b.value}` : b.value;
     return await buildExpression(rhsNode, endpoint);
   }
 
@@ -155,7 +168,7 @@ SELECT ?rhs WHERE {
 
     const typeQuery = `
 PREFIX om: <${OM('').value}>
-SELECT ?type WHERE { <${argUri}> a ?type }`;
+SELECT ?type WHERE { ${asSparqlTerm(argUri)} a ?type }`;
     const typeRes = await runSelectQuery(typeQuery, endpoint);
     const types = typeRes.results.bindings.map((b: any) => b.type.value);
 
@@ -166,9 +179,9 @@ PREFIX din61360: <${DINEN61360('').value}>
 PREFIX om: <${OM('').value}>
 
 SELECT ?val ?varname WHERE {
-  <${argUri}> a om:Variable .
-  BIND(REPLACE(STR(<${argUri}>), ".*[#/](.+)$", "$1") AS ?varname)
-  ?de parx:isDataFor <${argUri}> ;
+  ${asSparqlTerm(argUri)} a om:Variable .
+  BIND(REPLACE(STR(${asSparqlTerm(argUri)}), ".*[#/](.+)$", "$1") AS ?varname)
+  ?de parx:isDataFor ${asSparqlTerm(argUri)} ;
       din61360:has_Instance_Description ?desc .
   ?desc din61360:Value ?val .
 } LIMIT 1`;
@@ -213,16 +226,18 @@ async function getArgumentsViaPathQuery(nodeUri: string, endpoint: string): Prom
 PREFIX om: <${OM('').value}>
 PREFIX rdf: <${RDF('').value}>
 SELECT ?arg WHERE {
-  <${nodeUri}> om:arguments ?list .
-  ?list rdf:rest*/rdf:first ?arg .
-}`;
+  ${asSparqlTerm(nodeUri)} om:arguments ?list .
+  ?list rdf:rest*/rdf:first ?arg .}`;
 
   const res = await runSelectQuery(query, endpoint);
-  return res.results.bindings.map((b: any) => {
-    return b.arg.type === 'literal'
-      ? { termType: 'Literal', value: b.arg.value } as Literal
-      : { termType: 'NamedNode', value: b.arg.value } as NamedNode;
-  });
+return res.results.bindings.map((b: any) => {
+  if (b.arg.type === 'literal') {
+    return { termType: 'Literal', value: b.arg.value } as Literal;
+  }
+  const val = b.arg.type === 'bnode' ? `_:${b.arg.value}` : b.arg.value;
+  return { termType: 'NamedNode', value: val } as NamedNode;
+});
+
 }
 // Mapping of OpenMath operators to math symbols, more operators will be added as needed.
 const operatorMap: Record<string, string> = {
@@ -244,3 +259,5 @@ function operatorToSymbol(uri: string): string {
 function isFunctionOperator(op: string): boolean {
   return ['abs', 'nthRoot'].includes(op);
 }
+
+
