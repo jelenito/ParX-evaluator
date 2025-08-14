@@ -9,13 +9,13 @@ async function main() {
   const [,, repo, processUri, outputDataElement] = process.argv;
 
   if (!repo || !processUri || !outputDataElement) {
-    console.error(` Fehlende Argumente!
+    console.error(` Missing arguments!
 
-Verwendung:
+Usage:
   npx ts-node src/index.ts <REPOSITORY_NAME> <PROCESS_URI> <DATA_ELEMENT_URI>
 
-Beispiel:
-  npx ts-node src/index.ts TEST0525 http://example.org#MyProcess http://example.org#Output_DE
+Example:
+  npx ts-node src/index.ts TestRepoName http://example.org#MyProcess http://example.org#Output_DE
 `);
     process.exit(1);
   }
@@ -25,7 +25,7 @@ Beispiel:
 
  
      
-    console.log('🔍 Searching Interdependency formula...');
+    console.log('Searching Interdependency formula...');
     const formulaUri = await findFormulaForOutput(processUri, outputDataElement, endpoint);
 
     if (!formulaUri) {
