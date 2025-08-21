@@ -20,7 +20,10 @@ Example:
     process.exit(1);
   }
 
-  const endpoint = `http://localhost:7200/repositories/${repo}`;
+  // Smart endpoint detection: if repo looks like URL, use it directly, otherwise construct localhost URL
+  const endpoint = repo.startsWith('http://') || repo.startsWith('https://') 
+    ? repo 
+    : `http://localhost:7200/repositories/${repo}`;
   try {
 
  
