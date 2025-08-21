@@ -10,7 +10,7 @@ The evaluator connects to a SPARQL endpoint containing your manufacturing proces
 ### Start evaluation
 Run directly with ts-node:
 ```bash
-npx ts-node src/index.ts {$graphRepo} {$processURI} {$parameterURI}
+npm start {$graphRepo} {$processURI} {$parameterURI}
 ```
 - **`$graphRepo`** – Name of the GraphDB repository (e.g., "TESTREPO"). The full endpoint URL `http://localhost:7200/repositories/{name}` is constructed automatically.
 - **`$processURI`** – IRI of the process operator in the knowledge graph.
