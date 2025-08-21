@@ -4,48 +4,46 @@ import { evaluate } from 'mathjs';
 import { Node, Literal, NamedNode } from 'rdflib';
 
 /**
- * Evaluates a formula by finding the corresponding process operator and data element.
+ * Evaluates a formula by finding the corresponding process and data element
  * @param processUri URI of process operator
  * @param outputDEUri URI of data element
- * @param endpoint SPARQL-Endpoint
+ * @param endpoint SPARQL endpoint
  * @returns Result of the evaluation
  */
 
 
 
-function asSparqlTerm(id: string): string {
-  if (!id) return id;
+function sparqlTerm(uri: string): string {
+  if (!uri) return uri;
 
-  if (id.startsWith('<') || id.startsWith('_:')) return id;
+  if (uri.startsWith('<') || uri.startsWith('_:')) return uri;
 
-  if (id.startsWith('http://') || id.startsWith('https://')) return `<${id}>`;
-  return id;
+  if (uri.startsWith('http://') || uri.startsWith('https://')) return `<${uri}>`;
+  return uri;
 }
 
 
-// try to get the value of a variable directly (provided by a data element).
-async function tryGetVariableValue(varIri: string, endpoint: string): Promise<number | null> {
+async function getVarValue(varIri: string, endpoint: string): Promise<number | null> {
   const q = `
-    PREFIX din:  <http://www.w3id.org/hsu-aut/DINEN61360#>
-    PREFIX parx: <http://www.hsu-hh.de/aut/ParX#>
+    PREFIX DINEN61360:  <http://www.w3id.org/hsu-aut/DINEN61360#>
+    PREFIX ParX: <http://www.hsu-hh.de/aut/ParX#>
     SELECT ?val WHERE {
-      ?de parx:isDataFor <${varIri}> ;
-          din:has_Instance_Description ?id .
-      ?id din:Value ?val .
+      ?de ParX:isDataFor <${varIri}> ;
+          DINEN61360:has_Instance_Description ?desc .
+      ?desc DINEN61360:Value ?val .
     } LIMIT 1`;
   const res = await runSelectQuery(q, endpoint);
   const bindings = res.results.bindings;
   if (bindings.length === 0) return null;
   return Number(bindings[0].val.value);
 }
-// Find the formula for a variable by checking ParX interdependencies.
-async function findFormulaForVariable(varIri: string, endpoint: string): Promise<string | null> {
+async function findFormulaForVar(varIri: string, endpoint: string): Promise<string | null> {
   const q = `
     PREFIX om:   <http://openmath.org/vocab/math#>
     PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-    PREFIX parx: <http://www.hsu-hh.de/aut/ParX#>
+    PREFIX ParX: <http://www.hsu-hh.de/aut/ParX#>
     SELECT ?f WHERE {
-      ?proc parx:hasInterdependency ?f .
+      ?proc ParX:hasInterdependency ?f .
       ?f om:operator <http://www.openmath.org/cd/relation1#eq> ;
          om:arguments ?args .
       ?args rdf:first <${varIri}> .
@@ -56,191 +54,213 @@ async function findFormulaForVariable(varIri: string, endpoint: string): Promise
 }
 
 
-// Resolve a variable to a value by checking its assigned value or finding a potential formula.
-async function resolveVariableToNumber(
+async function resolveVar(
   varIri: string,
   endpoint: string,
   visited: Set<string> = new Set()
 ): Promise<number> {
   if (visited.has(varIri)) {
-    throw new Error(`Cyclic dependency detected while resolving ${varIri}`);
+    throw new Error(`Cyclic dependency detected: ${varIri}`);
   }
-  visited.add(varIri); // Track visited variables to avoid cycles
+  visited.add(varIri);
 
-  const direct = await tryGetVariableValue(varIri, endpoint);
+  const direct = await getVarValue(varIri, endpoint);
   if (direct !== null) return direct;
 
-  const formulaIri = await findFormulaForVariable(varIri, endpoint);
+  const formulaIri = await findFormulaForVar(varIri, endpoint);
   if (!formulaIri) {
-    throw new Error(`Missing value for variable ${varIri} and no formula found (LHS).`);
+    throw new Error(`No value or formula found for: ${varIri}`);
   }
 
-  // Build expression for equation (returns the expression on the RHS of the equation)
-  const { expression, variables } = await buildExpression(formulaIri, endpoint);
-  const exprWithValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => { 
+  const { expression, variables } = await buildExpr(formulaIri, endpoint);
+  const withValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => { 
     if (variables[name] !== undefined) return variables[name].toString();
-    throw new Error(`Missing value for: ${name}`);
+    throw new Error(`Missing value: ${name}`);
   });
-  const result = evaluate(exprWithValues); 
-  return Number(result);
+  return Number(evaluate(withValues));
 }
 
 
-export async function evaluateFormulaByProcess(processUri: string, outputDEUri: string, endpoint: string): Promise<{ expression: string, result: number }> {
-  const formulaUri = await findFormulaUri(processUri, outputDEUri, endpoint);
+/**
+ * Evaluate formula for a process output
+ * @param processUri URI of the process
+ * @param outputUri URI of the output data element
+ * @param endpoint SPARQL endpoint
+ * @returns Expression and calculated result
+ */
+export async function evaluateByProcess(processUri: string, outputUri: string, endpoint: string): Promise<{ expression: string, result: number }> {
+  const formulaUri = await findFormula(processUri, outputUri, endpoint);
   return evaluateFormula(formulaUri, endpoint);
 }
 
-//Find formula for a given process and data element.
-async function findFormulaUri(processUri: string, dataElementUri: string, endpoint: string): Promise<string> {
-  const query = `
-PREFIX parx: <${PARX('').value}>
+async function findFormula(processUri: string, dataElementUri: string, endpoint: string): Promise<string> {
+  const q = `
+PREFIX ParX: <${PARX('').value}>
 PREFIX om: <${OM('').value}>
 PREFIX rdf: <${RDF('').value}>
 SELECT ?formula WHERE {
-  <${processUri}> parx:hasInterdependency ?formula .
-  ?formula om:arguments ?argList .
-  ?argList rdf:first ?lhs .
+  <${processUri}> ParX:hasInterdependency ?formula .
+  ?formula om:arguments ?args .
+  ?args rdf:first ?lhs .
   ?lhs a om:Variable .
-  ?de parx:isDataFor ?lhs .
+  ?de ParX:isDataFor ?lhs .
   FILTER(str(?de) = "${dataElementUri}")
 } LIMIT 1`;
 
-  const res = await runSelectQuery(query, endpoint);
+  const res = await runSelectQuery(q, endpoint);
   if (res.results.bindings.length === 0) {
-    throw new Error('No formula found for the given request.');
+    throw new Error('No formula found.');
   }
   return res.results.bindings[0].formula.value;
 }
 
-// Evaluate a formula by its URI, returns the evaluated expression and its result.
+/**
+ * Evaluate a formula by its URI
+ * @param formulaUri URI of the formula
+ * @param endpoint SPARQL endpoint
+ * @returns Expression and calculated result
+ */
 export async function evaluateFormula(formulaUri: string, endpoint: string): Promise<{ expression: string, result: number }> {
-  const { expression, variables } = await buildExpression(formulaUri, endpoint);
+  const { expression, variables } = await buildExpr(formulaUri, endpoint);
 
-  const exprWithValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => {
+  const withValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => {
     if (variables[name] !== undefined) return variables[name].toString();
-    throw new Error(`Missing value for: ${name}`);
+    throw new Error(`Missing value: ${name}`);
   });
 
-  const result = evaluate(exprWithValues);
-  return { expression: exprWithValues, result };
+  const result = evaluate(withValues);
+  return { expression: withValues, result };
 }
 
-// build a math expression for an OpenMath application node
-async function buildExpression(nodeUri: string, endpoint: string): Promise<{ expression: string, variables: Record<string, number> }> {
-  const operatorQuery = `
+async function buildExpr(nodeUri: string, endpoint: string): Promise<{ expression: string, variables: Record<string, number> }> {
+  const opQuery = `
 PREFIX om: <${OM('').value}>
-SELECT ?op WHERE { ${asSparqlTerm(nodeUri)} om:operator ?op } LIMIT 1`;
-  const opResult = await runSelectQuery(operatorQuery, endpoint);
-  const operatorUri = opResult.results.bindings[0].op.value;
+SELECT ?op WHERE { ${sparqlTerm(nodeUri)} om:operator ?op } LIMIT 1`;
+  const opRes = await runSelectQuery(opQuery, endpoint);
+  const opUri = opRes.results.bindings[0].op.value;
 
-  if (operatorUri.endsWith('#eq')) {
+  if (opUri.endsWith('#eq')) {
     const rhsQuery = `
 PREFIX om: <${OM('').value}>
 PREFIX rdf: <${RDF('').value}>
 SELECT ?rhs WHERE {
-   ${asSparqlTerm(nodeUri)} om:arguments ?list .
-  ?list rdf:rest ?tail .
+   ${sparqlTerm(nodeUri)} om:arguments ?args .
+  ?args rdf:rest ?tail .
   ?tail rdf:first ?rhs .
 }`;
-    const rhsResult = await runSelectQuery(rhsQuery, endpoint);
-    const b = rhsResult.results.bindings[0].rhs;
+    const rhsRes = await runSelectQuery(rhsQuery, endpoint);
+    const b = rhsRes.results.bindings[0].rhs;
     const rhsNode = b.type === 'bnode' ? `_:${b.value}` : b.value;
-    return await buildExpression(rhsNode, endpoint);
+    return await buildExpr(rhsNode, endpoint);
   }
 
-  const argNodes = await getArgumentsViaPathQuery(nodeUri, endpoint);
-  const variables: Record<string, number> = {};
-  const argsByOrder: string[] = [];
-  const expressionCache = new Set<string>();
+  const args = await getArgs(nodeUri, endpoint);
+  const vars: Record<string, number> = {};
+  const parts: string[] = [];
+  const seen = new Set<string>();
 
-  for (const arg of argNodes) {
+  for (const arg of args) {
     if (arg.termType === 'Literal') {
-      argsByOrder.push((arg as Literal).value);
+      parts.push((arg as Literal).value);
       continue;
     }
 
     if (arg.termType !== 'NamedNode') {
-      throw new Error(`not supported Node-Type: ${arg.termType}`);
+      throw new Error(`Unsupported node type: ${arg.termType}`);
     }
 
     const argUri = (arg as NamedNode).value;
 
     const typeQuery = `
 PREFIX om: <${OM('').value}>
-SELECT ?type WHERE { ${asSparqlTerm(argUri)} a ?type }`;
+SELECT ?type WHERE { ${sparqlTerm(argUri)} a ?type }`;
     const typeRes = await runSelectQuery(typeQuery, endpoint);
     const types = typeRes.results.bindings.map((b: any) => b.type.value);
 
     if (types.includes(OM('Variable').value) && !types.includes(OM('Application').value)) {
-      const valueQuery = `
-PREFIX parx: <${PARX('').value}>
-PREFIX din61360: <${DINEN61360('').value}>
+      const valQuery = `
+PREFIX ParX: <${PARX('').value}>
+PREFIX DINEN61360: <${DINEN61360('').value}>
 PREFIX om: <${OM('').value}>
 
-SELECT ?val ?varname WHERE {
-  ${asSparqlTerm(argUri)} a om:Variable .
-  BIND(REPLACE(STR(${asSparqlTerm(argUri)}), ".*[#/](.+)$", "$1") AS ?varname)
-  ?de parx:isDataFor ${asSparqlTerm(argUri)} ;
-      din61360:has_Instance_Description ?desc .
-  ?desc din61360:Value ?val .
+SELECT ?val ?name WHERE {
+  ${sparqlTerm(argUri)} a om:Variable .
+  BIND(REPLACE(STR(${sparqlTerm(argUri)}), ".*[#/](.+)$", "$1") AS ?name)
+  ?de ParX:isDataFor ${sparqlTerm(argUri)} ;
+      DINEN61360:has_Instance_Description ?desc .
+  ?desc DINEN61360:Value ?val .
 } LIMIT 1`;
 
-      const valRes = await runSelectQuery(valueQuery, endpoint);
+      const valRes = await runSelectQuery(valQuery, endpoint);
       if (valRes.results.bindings.length > 0) {
         const b: any = valRes.results.bindings[0];
-        variables[b.varname.value] = parseFloat(b.val.value);
-        argsByOrder.push(b.varname.value);
+        vars[b.name.value] = parseFloat(b.val.value);
+        parts.push(b.name.value);
         continue;
       }
       
-const varnameFromUri = argUri.replace(/^.*[\/#]/, ''); 
-const num = await resolveVariableToNumber(argUri, endpoint);     
-variables[varnameFromUri] = num;                       
-argsByOrder.push(varnameFromUri);
+const name = argUri.replace(/^.*[\/#]/, ''); 
+const val = await resolveVar(argUri, endpoint);     
+vars[name] = val;                       
+parts.push(name);
 continue;
 
     } else if (types.includes(OM('Application').value)) {
-      const nested = await buildExpression(argUri, endpoint);
-      Object.assign(variables, nested.variables);
-      if (!expressionCache.has(nested.expression)) {
-        argsByOrder.push(`(${nested.expression})`);
-        expressionCache.add(nested.expression);
+      const nested = await buildExpr(argUri, endpoint);
+      Object.assign(vars, nested.variables);
+      if (!seen.has(nested.expression)) {
+        parts.push(`(${nested.expression})`);
+        seen.add(nested.expression);
       }
       continue;
     }
 
-    throw new Error(`Not known argument type: ${argUri}`);
+    throw new Error(`Unknown type: ${argUri}`);
   }
 
-  const op = operatorToSymbol(operatorUri);
-  const expression = isFunctionOperator(op)
-    ? `${op}(${argsByOrder.join(', ')})`
-    : argsByOrder.join(` ${op} `);
+  const op = opToSymbol(opUri);
+  const expr = isFunction(op)
+    ? `${op}(${parts.join(', ')})`
+    : parts.join(` ${op} `);
 
-  return { expression, variables };
+  return { expression: expr, variables: vars };
 }
 
-async function getArgumentsViaPathQuery(nodeUri: string, endpoint: string): Promise<Node[]> {
-  const query = `
+async function getArgs(nodeUri: string, endpoint: string): Promise<Node[]> {
+  const firstQ = `
 PREFIX om: <${OM('').value}>
 PREFIX rdf: <${RDF('').value}>
 SELECT ?arg WHERE {
-  ${asSparqlTerm(nodeUri)} om:arguments ?list .
-  ?list rdf:rest*/rdf:first ?arg .}`;
+  ${sparqlTerm(nodeUri)} om:arguments/rdf:first ?arg .
+}`;
 
-  const res = await runSelectQuery(query, endpoint);
-return res.results.bindings.map((b: any) => {
-  if (b.arg.type === 'literal') {
-    return { termType: 'Literal', value: b.arg.value } as Literal;
-  }
-  const val = b.arg.type === 'bnode' ? `_:${b.arg.value}` : b.arg.value;
-  return { termType: 'NamedNode', value: val } as NamedNode;
-});
+  const firstRes = await runSelectQuery(firstQ, endpoint);
+  const first = firstRes.results.bindings[0]?.arg;
+  
+  if (!first) return [];
+  
+  const secondQ = `
+PREFIX om: <${OM('').value}>
+PREFIX rdf: <${RDF('').value}>
+SELECT ?arg WHERE {
+  ${sparqlTerm(nodeUri)} om:arguments/rdf:rest/rdf:first ?arg .
+}`;
 
+  const secondRes = await runSelectQuery(secondQ, endpoint);
+  const second = secondRes.results.bindings[0]?.arg;
+  
+  const args = [first];
+  if (second) args.push(second);
+  
+  return args.map((b: any) => {
+    if (b.type === 'literal') {
+      return { termType: 'Literal', value: b.value } as Literal;
+    }
+    const val = b.type === 'bnode' ? `_:${b.value}` : b.value;
+    return { termType: 'NamedNode', value: val } as NamedNode;
+  });
 }
-// Mapping of OpenMath operators to math symbols, more operators will be added as needed.
-const operatorMap: Record<string, string> = {
+const OP_MAP: Record<string, string> = {
   'http://www.openmath.org/cd/arith1#plus': '+',
   'http://www.openmath.org/cd/arith1#times': '*',
   'http://www.openmath.org/cd/arith1#divide': '/',
@@ -250,13 +270,13 @@ const operatorMap: Record<string, string> = {
   'http://www.openmath.org/cd/arith1#abs': 'abs',
 };
 
-function operatorToSymbol(uri: string): string {
-  const op = operatorMap[uri];
-  if (!op) throw new Error(`Not supported operator: ${uri}`);
+function opToSymbol(opUri: string): string {
+  const op = OP_MAP[opUri];
+  if (!op) throw new Error(`Unsupported operator: ${opUri}`);
   return op;
 }
 
-function isFunctionOperator(op: string): boolean {
+function isFunction(op: string): boolean {
   return ['abs', 'nthRoot'].includes(op);
 }
 
