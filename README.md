@@ -12,7 +12,7 @@ Run directly with ts-node:
 ```bash
 npx ts-node src/index.ts {$graphRepo} {$processURI} {$parameterURI}
 ```
-- **`$graphRepo`** – URL or file path of the knowledge graph repository (SPARQL endpoint).
+- **`$graphRepo`** – Name of the GraphDB repository (e.g., "TESTREPO"). The full endpoint URL `http://localhost:7200/repositories/{name}` is constructed automatically.
 - **`$processURI`** – IRI of the process operator in the knowledge graph.
 - **`$parameterURI`** – IRI of the parameter to be evaluated.
 
@@ -30,3 +30,4 @@ This will:
   - **VDI/VDE 3682** – process modeling according to the formalized process description (fpd)
   - **DIN EN 61360** – parameter characteristics
   - **OpenMath-RDF** – mathematical expressions
+ 
