@@ -72,3 +72,6 @@ storybook-static/
 
 # Turtle files
 *.ttl
+
+# md files
+*.md
