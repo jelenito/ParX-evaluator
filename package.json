@@ -1,15 +1,25 @@
 {
   "name": "parx-evaluator",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Evaluates mathematical formulas stored in RDF/OpenMath format against SPARQL endpoints",
+  "main": "dist/lib/index.js",
+  "types": "dist/lib/index.d.ts",
   "scripts": {
     "start": "ts-node src/index.ts",
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": [
+    "openmath",
+    "rdf",
+    "sparql",
+    "formula",
+    "evaluator",
+    "parx"
+  ],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "devDependencies": {
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
@@ -19,7 +29,8 @@
     "mathjs": "^14.4.0",
     "rdflib": "^2.2.37"
   },
-  "directories": {
-    "test": "test"
-  }
+  "files": [
+    "dist",
+    "README.md"
+  ]
 }
