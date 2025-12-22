@@ -218,10 +218,10 @@ continue;
     throw new Error(`Unknown type: ${argUri}`);
   }
 
-  const op = opToSymbol(opUri);
-  const expr = isFunction(op)
-    ? `${op}(${parts.join(', ')})`
-    : parts.join(` ${op} `);
+  const op = getOperator(opUri);
+  const expr = op.arity === 1
+    ? `${op.symbol}(${parts.join(', ')})`
+    : parts.join(` ${op.symbol} `);
 
   return { expression: expr, variables: vars };
 }
@@ -260,24 +260,26 @@ SELECT ?arg WHERE {
     return { termType: 'NamedNode', value: val } as NamedNode;
   });
 }
-const OP_MAP: Record<string, string> = {
-  'http://www.openmath.org/cd/arith1#plus': '+',
-  'http://www.openmath.org/cd/arith1#times': '*',
-  'http://www.openmath.org/cd/arith1#divide': '/',
-  'http://www.openmath.org/cd/arith1#minus': '-',
-  'http://www.openmath.org/cd/arith1#power': '^',
-  'http://www.openmath.org/cd/arith1#root': 'nthRoot',
-  'http://www.openmath.org/cd/arith1#abs': 'abs',
+const OP_MAP: Record<string, { symbol: string; arity: 1 | 2 }> = {
+  
+  'http://www.openmath.org/cd/arith1#plus':   { symbol: '+', arity: 2 },
+  'http://www.openmath.org/cd/arith1#times':  { symbol: '*', arity: 2 },
+  'http://www.openmath.org/cd/arith1#divide': { symbol: '/', arity: 2 },
+  'http://www.openmath.org/cd/arith1#minus':  { symbol: '-', arity: 2 },
+  'http://www.openmath.org/cd/arith1#power':  { symbol: '^', arity: 2 },
+  'http://www.openmath.org/cd/arith1#root':   { symbol: 'nthRoot', arity: 2 },
+  
+  'http://www.openmath.org/cd/arith1#abs':    { symbol: 'abs', arity: 1 },
+  'http://www.openmath.org/cd/arith1#sqrt':   { symbol: 'sqrt', arity: 1 },
+  'http://www.openmath.org/cd/transc1#exp':   { symbol: 'exp', arity: 1 },
+  'http://www.openmath.org/cd/transc1#ln':    { symbol: 'log', arity: 1 },
+  'http://www.openmath.org/cd/transc1#log':   { symbol: 'log10', arity: 1 },
 };
 
-function opToSymbol(opUri: string): string {
+function getOperator(opUri: string): { symbol: string; arity: 1 | 2 } {
   const op = OP_MAP[opUri];
   if (!op) throw new Error(`Unsupported operator: ${opUri}`);
   return op;
-}
-
-function isFunction(op: string): boolean {
-  return ['abs', 'nthRoot'].includes(op);
 }
 
 
