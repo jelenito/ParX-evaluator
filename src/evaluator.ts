@@ -37,6 +37,18 @@ async function getVarValue(varIri: string, endpoint: string): Promise<number | n
   if (bindings.length === 0) return null;
   return Number(bindings[0].val.value);
 }
+
+async function getDataElementForVar(varIri: string, endpoint: string): Promise<string | null> {
+  const q = `
+    PREFIX ParX: <http://www.hsu-hh.de/aut/ParX#>
+    SELECT ?de WHERE {
+      ?de ParX:isDataFor <${varIri}> .
+    } LIMIT 1`;
+  const res = await runSelectQuery(q, endpoint);
+  const bindings = res.results.bindings;
+  if (bindings.length === 0) return null;
+  return bindings[0].de.value;
+}
 async function findFormulaForVar(varIri: string, endpoint: string): Promise<string | null> {
   const q = `
     PREFIX om:   <http://openmath.org/vocab/math#>
@@ -57,7 +69,8 @@ async function findFormulaForVar(varIri: string, endpoint: string): Promise<stri
 async function resolveVar(
   varIri: string,
   endpoint: string,
-  visited: Set<string> = new Set()
+  visited: Set<string> = new Set(),
+  collectedWarnings: RestrictionWarning[] = []
 ): Promise<number> {
   if (visited.has(varIri)) {
     throw new Error(`Cyclic dependency detected: ${varIri}`);
@@ -72,12 +85,25 @@ async function resolveVar(
     throw new Error(`No value or formula found for: ${varIri}`);
   }
 
-  const { expression, variables } = await buildExpr(formulaIri, endpoint);
-  const withValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => { 
+  const { expression, variables, intermediateWarnings } = await buildExprWithWarnings(formulaIri, endpoint, collectedWarnings);
+  const withValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => {
     if (variables[name] !== undefined) return variables[name].toString();
     throw new Error(`Missing value: ${name}`);
   });
-  return Number(evaluate(withValues));
+  const result = Number(evaluate(withValues));
+
+  // Check restrictions for this intermediate result
+  const dataElementUri = await getDataElementForVar(varIri, endpoint);
+  if (dataElementUri) {
+    const { warnings } = await checkRestrictions(dataElementUri, result, endpoint);
+    for (const w of warnings) {
+      const varName = varIri.replace(/^.*[\/#]/, '');
+      w.message = `[Intermediate: ${varName}] ${w.message}`;
+      collectedWarnings.push(w);
+    }
+  }
+
+  return result;
 }
 
 
@@ -106,14 +132,27 @@ export async function evaluateByProcess(
   doCheckRestrictions: boolean = true
 ): Promise<EvaluationResult> {
   const formulaUri = await findFormula(processUri, outputUri, endpoint);
-  const evalResult = await evaluateFormula(formulaUri, endpoint);
+
+  // Use buildExprWithWarnings to collect intermediate warnings
+  const collectedWarnings: RestrictionWarning[] = [];
+  const { expression, variables, intermediateWarnings } = await buildExprWithWarnings(formulaUri, endpoint, collectedWarnings);
+
+  const withValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => {
+    if (variables[name] !== undefined) return variables[name].toString();
+    throw new Error(`Missing value: ${name}`);
+  });
+
+  const result = evaluate(withValues);
 
   if (doCheckRestrictions) {
-    const { warnings, checkedCount } = await checkRestrictions(outputUri, evalResult.result, endpoint);
-    return { ...evalResult, warnings, restrictionsChecked: checkedCount };
+    // Check final output restrictions
+    const { warnings: finalWarnings, checkedCount } = await checkRestrictions(outputUri, result, endpoint);
+    const allWarnings = [...intermediateWarnings, ...finalWarnings];
+    const totalChecked = checkedCount + intermediateWarnings.length;
+    return { expression: withValues, result, warnings: allWarnings, restrictionsChecked: totalChecked };
   }
 
-  return evalResult;
+  return { expression: withValues, result };
 }
 
 async function findFormula(processUri: string, dataElementUri: string, endpoint: string): Promise<string> {
@@ -155,7 +194,24 @@ export async function evaluateFormula(formulaUri: string, endpoint: string): Pro
   return { expression: withValues, result };
 }
 
+async function buildExprWithWarnings(
+  nodeUri: string,
+  endpoint: string,
+  collectedWarnings: RestrictionWarning[] = []
+): Promise<{ expression: string, variables: Record<string, number>, intermediateWarnings: RestrictionWarning[] }> {
+  return buildExprInternal(nodeUri, endpoint, collectedWarnings);
+}
+
 async function buildExpr(nodeUri: string, endpoint: string): Promise<{ expression: string, variables: Record<string, number> }> {
+  const result = await buildExprInternal(nodeUri, endpoint, []);
+  return { expression: result.expression, variables: result.variables };
+}
+
+async function buildExprInternal(
+  nodeUri: string,
+  endpoint: string,
+  collectedWarnings: RestrictionWarning[]
+): Promise<{ expression: string, variables: Record<string, number>, intermediateWarnings: RestrictionWarning[] }> {
   const opQuery = `
 PREFIX om: <${OM('').value}>
 SELECT ?op WHERE { ${sparqlTerm(nodeUri)} om:operator ?op } LIMIT 1`;
@@ -174,7 +230,7 @@ SELECT ?rhs WHERE {
     const rhsRes = await runSelectQuery(rhsQuery, endpoint);
     const b = rhsRes.results.bindings[0].rhs;
     const rhsNode = b.type === 'bnode' ? `_:${b.value}` : b.value;
-    return await buildExpr(rhsNode, endpoint);
+    return await buildExprInternal(rhsNode, endpoint, collectedWarnings);
   }
 
   const args = await getArgs(nodeUri, endpoint);
@@ -222,14 +278,14 @@ SELECT ?val ?name WHERE {
         continue;
       }
       
-const name = argUri.replace(/^.*[\/#]/, ''); 
-const val = await resolveVar(argUri, endpoint);     
+const name = argUri.replace(/^.*[\/#]/, '');
+const val = await resolveVar(argUri, endpoint, new Set(), collectedWarnings);     
 vars[name] = val;                       
 parts.push(name);
 continue;
 
     } else if (types.includes(OM('Application').value)) {
-      const nested = await buildExpr(argUri, endpoint);
+      const nested = await buildExprInternal(argUri, endpoint, collectedWarnings);
       Object.assign(vars, nested.variables);
       if (!seen.has(nested.expression)) {
         parts.push(`(${nested.expression})`);
@@ -246,7 +302,7 @@ continue;
     ? `${op.symbol}(${parts.join(', ')})`
     : parts.join(` ${op.symbol} `);
 
-  return { expression: expr, variables: vars };
+  return { expression: expr, variables: vars, intermediateWarnings: collectedWarnings };
 }
 
 async function getArgs(nodeUri: string, endpoint: string): Promise<Node[]> {
