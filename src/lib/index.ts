@@ -8,6 +8,12 @@
 // Main evaluation functions
 export { evaluateFormula, evaluateByProcess } from '../evaluator';
 
+// Restriction checking
+export { checkRestrictions } from '../evaluator';
+
+// Types
+export type { EvaluationResult, RestrictionWarning, RestrictionCheckResult } from '../evaluator';
+
 // Formula resolution
 export { findFormulaForOutput } from '../formulaResolver';
 

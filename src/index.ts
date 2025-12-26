@@ -1,5 +1,5 @@
 import { findFormulaForOutput } from './formulaResolver';
-import { evaluateFormula } from './evaluator';
+import { evaluateFormula, checkRestrictions } from './evaluator';
 
 //const endpoint = 'http://localhost:7200/repositories/TEST0525'; 
 //const processUri = 'http://www.hsu-hh.de/aut/ontologies/example#Injection'; 
@@ -42,6 +42,17 @@ Example:
 
     console.log('Evaluated Expression:', result.expression);
     console.log('Calculation-Result:', result.result);
+
+    // Check restrictions
+    const { warnings, checkedCount } = await checkRestrictions(outputDataElement, result.result, endpoint);
+    if (warnings.length > 0) {
+      console.log(`\n⚠️  Restriction Warnings (checked ${checkedCount}):`);
+      for (const w of warnings) {
+        console.log(`   - ${w.message}`);
+      }
+    } else {
+      console.log(`✓ No restriction violations. Checked ${checkedCount} restrictions.`);
+    }
   } catch (e) {
     console.error(' Error:', e);
   }

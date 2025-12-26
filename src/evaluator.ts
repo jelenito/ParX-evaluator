@@ -82,15 +82,38 @@ async function resolveVar(
 
 
 /**
+ * Result of formula evaluation including optional restriction warnings
+ */
+export interface EvaluationResult {
+  expression: string;
+  result: number;
+  warnings?: RestrictionWarning[];
+  restrictionsChecked?: number;
+}
+
+/**
  * Evaluate formula for a process output
  * @param processUri URI of the process
  * @param outputUri URI of the output data element
  * @param endpoint SPARQL endpoint
- * @returns Expression and calculated result
+ * @param checkRestrictions Whether to check restrictions (default: true)
+ * @returns Expression, calculated result, and any restriction warnings
  */
-export async function evaluateByProcess(processUri: string, outputUri: string, endpoint: string): Promise<{ expression: string, result: number }> {
+export async function evaluateByProcess(
+  processUri: string,
+  outputUri: string,
+  endpoint: string,
+  doCheckRestrictions: boolean = true
+): Promise<EvaluationResult> {
   const formulaUri = await findFormula(processUri, outputUri, endpoint);
-  return evaluateFormula(formulaUri, endpoint);
+  const evalResult = await evaluateFormula(formulaUri, endpoint);
+
+  if (doCheckRestrictions) {
+    const { warnings, checkedCount } = await checkRestrictions(outputUri, evalResult.result, endpoint);
+    return { ...evalResult, warnings, restrictionsChecked: checkedCount };
+  }
+
+  return evalResult;
 }
 
 async function findFormula(processUri: string, dataElementUri: string, endpoint: string): Promise<string> {
@@ -282,4 +305,95 @@ function getOperator(opUri: string): { symbol: string; arity: 1 | 2 } {
   return op;
 }
 
+/**
+ * Restriction warning returned when a calculated value violates a constraint
+ */
+export interface RestrictionWarning {
+  restrictionDE: string;
+  logic: string;
+  limitValue: number;
+  actualValue: number;
+  message: string;
+}
+
+/**
+ * Logic operators for restriction checking
+ */
+const LOGIC_OPS: Record<string, (actual: number, limit: number) => boolean> = {
+  '<=': (a, l) => a <= l,
+  '>=': (a, l) => a >= l,
+  '<':  (a, l) => a < l,
+  '>':  (a, l) => a > l,
+  '=':  (a, l) => a === l,
+  '==': (a, l) => a === l,
+};
+
+/**
+ * Result of restriction check
+ */
+export interface RestrictionCheckResult {
+  warnings: RestrictionWarning[];
+  checkedCount: number;
+}
+
+/**
+ * Check if a calculated result violates any restrictions on the output data element
+ * @param dataElementUri URI of the output data element
+ * @param calculatedValue The calculated result to check
+ * @param endpoint SPARQL endpoint
+ * @returns Object with warnings array and count of checked restrictions
+ */
+export async function checkRestrictions(
+  dataElementUri: string,
+  calculatedValue: number,
+  endpoint: string
+): Promise<RestrictionCheckResult> {
+  const q = `
+    PREFIX ParX: <${PARX('').value}>
+    PREFIX DINEN61360: <${DINEN61360('').value}>
+    SELECT ?restrictionDE ?logic ?limitValue WHERE {
+      <${dataElementUri}> ParX:isRestrictedBy ?restrictionDE .
+      ?restrictionDE DINEN61360:has_Instance_Description ?desc .
+      ?desc DINEN61360:Logic_Interpretation ?logic ;
+            DINEN61360:Value ?limitValue ;
+            DINEN61360:Expression_Goal "Requirement" .
+    }`;
+
+  const res = await runSelectQuery(q, endpoint);
+  const bindings = res.results.bindings;
+  const warnings: RestrictionWarning[] = [];
+  const checkedCount = bindings.length;
+
+  for (const b of bindings) {
+    const logic = b.logic.value;
+    const limitValue = parseFloat(b.limitValue.value);
+    const restrictionDE = b.restrictionDE.value;
+
+    const checkFn = LOGIC_OPS[logic];
+    if (!checkFn) {
+      warnings.push({
+        restrictionDE,
+        logic,
+        limitValue,
+        actualValue: calculatedValue,
+        message: `Unknown logic operator: ${logic}`
+      });
+      continue;
+    }
+
+    const satisfied = checkFn(calculatedValue, limitValue);
+    if (!satisfied) {
+      const deName = restrictionDE.replace(/^.*[\/#]/, '');
+      warnings.push({
+        restrictionDE,
+        logic,
+        limitValue,
+        actualValue: calculatedValue,
+        message: `Restriction violated: ${calculatedValue} ${logic} ${limitValue} (from ${deName})`
+      });
+    }
+  }
+
+  return { warnings, checkedCount };
+}
 
