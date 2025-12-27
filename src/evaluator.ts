@@ -1,7 +1,7 @@
-import { runSelectQuery } from './sparqlClient';
+import { runSelectQuery, runConstructQuery } from './sparqlClient';
 import { OM, PARX, DINEN61360, RDF } from './namespaces';
 import { evaluate } from 'mathjs';
-import { Node, Literal, NamedNode } from 'rdflib';
+import { Node, Literal, NamedNode, graph, parse } from 'rdflib';
 
 /**
  * Evaluates a formula by finding the corresponding process and data element
@@ -20,6 +20,192 @@ function sparqlTerm(uri: string): string {
 
   if (uri.startsWith('http://') || uri.startsWith('https://')) return `<${uri}>`;
   return uri;
+}
+
+/**
+ * Loads entire formula structure into in-memory graph
+ */
+async function loadFormulaGraph(formulaUri: string, endpoint: string): Promise<any> {
+  // Use a simpler approach: get all triples connected to the formula via any path
+  const q = `
+PREFIX om: <${OM('').value}>
+PREFIX rdf: <${RDF('').value}>
+
+CONSTRUCT {
+  ?s ?p ?o .
+}
+WHERE {
+  {
+    # Direct properties of formula
+    <${formulaUri}> ?p ?o .
+    BIND(<${formulaUri}> AS ?s)
+  }
+  UNION
+  {
+    # Traverse all nested nodes (arguments lists, blank nodes, etc.)
+    <${formulaUri}> (om:arguments|rdf:first|rdf:rest|om:operator|rdf:type)* ?s .
+    ?s ?p ?o .
+  }
+}`;
+
+  const turtle = await runConstructQuery(q, endpoint);
+  const store = graph();
+  parse(turtle, store, 'http://example.org/', 'text/turtle');
+  return store;
+}
+
+/**
+ * Gets the operator URI from an in-memory graph node
+ */
+function getOperatorFromGraph(store: any, nodeUri: string): string | null {
+  const node = nodeUri.startsWith('_:')
+    ? store.bnode(nodeUri.substring(2))
+    : store.sym(nodeUri);
+  const opPred = store.sym(OM('operator').value);
+  const stmts = store.statementsMatching(node, opPred, null);
+  return stmts.length > 0 ? stmts[0].object.value : null;
+}
+
+/**
+ * Gets arguments from RDF list in memory
+ */
+function getArgsFromGraph(store: any, nodeUri: string): any[] {
+  const node = nodeUri.startsWith('_:')
+    ? store.bnode(nodeUri.substring(2))
+    : store.sym(nodeUri);
+  const argsPred = store.sym(OM('arguments').value);
+  const firstPred = store.sym(RDF('first').value);
+  const restPred = store.sym(RDF('rest').value);
+
+  const argsStmts = store.statementsMatching(node, argsPred, null);
+  if (argsStmts.length === 0) return [];
+
+  const listHead = argsStmts[0].object;
+
+  // Handle rdflib Collection objects (used for RDF lists in parsed Turtle)
+  if (listHead.termType === 'Collection' && listHead.elements) {
+    return listHead.elements;
+  }
+
+  // Fallback: traverse rdf:first/rdf:rest manually
+  const args: any[] = [];
+  let current = listHead;
+
+  while (current && current.value !== RDF('nil').value) {
+    const firstStmts = store.statementsMatching(current, firstPred, null);
+    if (firstStmts.length > 0) {
+      args.push(firstStmts[0].object);
+    }
+    const restStmts = store.statementsMatching(current, restPred, null);
+    if (restStmts.length > 0) {
+      current = restStmts[0].object;
+    } else {
+      break;
+    }
+  }
+
+  return args;
+}
+
+/**
+ * Checks if a node is an om:Application in the graph
+ */
+function isApplication(store: any, node: any): boolean {
+  const typePred = store.sym(RDF('type').value);
+  const appType = store.sym(OM('Application').value);
+  const stmts = store.statementsMatching(node, typePred, appType);
+  return stmts.length > 0;
+}
+
+/**
+ * Checks if a node is an om:Variable in the graph
+ */
+function isVariable(store: any, node: any): boolean {
+  const typePred = store.sym(RDF('type').value);
+  const varType = store.sym(OM('Variable').value);
+  const stmts = store.statementsMatching(node, typePred, varType);
+  return stmts.length > 0;
+}
+
+/**
+ * Build expression from in-memory graph
+ */
+async function buildExprFromGraph(
+  store: any,
+  nodeUri: string,
+  endpoint: string,
+  checkContext: IntermediateCheckContext
+): Promise<{ expression: string, variables: Record<string, number> }> {
+  const opUri = getOperatorFromGraph(store, nodeUri);
+  if (!opUri) {
+    throw new Error(`No operator found for node: ${nodeUri}`);
+  }
+
+  // Handle equality - get RHS
+  if (opUri.endsWith('#eq')) {
+    const args = getArgsFromGraph(store, nodeUri);
+    if (args.length < 2) {
+      throw new Error('Equality requires 2 arguments');
+    }
+    const rhsNode = args[1];
+    const rhsUri = rhsNode.termType === 'BlankNode' ? `_:${rhsNode.value}` : rhsNode.value;
+    return buildExprFromGraph(store, rhsUri, endpoint, checkContext);
+  }
+
+  const args = getArgsFromGraph(store, nodeUri);
+  const vars: Record<string, number> = {};
+  const parts: string[] = [];
+  const seen = new Set<string>();
+
+  for (const arg of args) {
+    // Literal value
+    if (arg.termType === 'Literal') {
+      parts.push(arg.value);
+      continue;
+    }
+
+    const argUri = arg.termType === 'BlankNode' ? `_:${arg.value}` : arg.value;
+
+    // Check if it's an Application (nested formula)
+    if (isApplication(store, arg)) {
+      const nested = await buildExprFromGraph(store, argUri, endpoint, checkContext);
+      Object.assign(vars, nested.variables);
+      if (!seen.has(nested.expression)) {
+        parts.push(`(${nested.expression})`);
+        seen.add(nested.expression);
+      }
+      continue;
+    }
+
+    // Check if it's a Variable
+    if (isVariable(store, arg) || arg.termType === 'NamedNode') {
+      const varIri = arg.value;
+      const name = varIri.replace(/^.*[\/#]/, '');
+
+      // Try to get direct value
+      const direct = await getVarValue(varIri, endpoint);
+      if (direct !== null) {
+        vars[name] = direct;
+        parts.push(name);
+        continue;
+      }
+
+      // Try to resolve via formula
+      const val = await resolveVar(varIri, endpoint, new Set(), checkContext);
+      vars[name] = val;
+      parts.push(name);
+      continue;
+    }
+
+    throw new Error(`Unknown argument type: ${arg.termType}`);
+  }
+
+  const op = getOperator(opUri);
+  const expr = op.arity === 1
+    ? `${op.symbol}(${parts.join(', ')})`
+    : parts.join(` ${op.symbol} `);
+
+  return { expression: expr, variables: vars };
 }
 
 
@@ -66,11 +252,16 @@ async function findFormulaForVar(varIri: string, endpoint: string): Promise<stri
 }
 
 
+interface IntermediateCheckContext {
+  warnings: RestrictionWarning[];
+  checkedCount: number;
+}
+
 async function resolveVar(
   varIri: string,
   endpoint: string,
   visited: Set<string> = new Set(),
-  collectedWarnings: RestrictionWarning[] = []
+  checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0 }
 ): Promise<number> {
   if (visited.has(varIri)) {
     throw new Error(`Cyclic dependency detected: ${varIri}`);
@@ -85,7 +276,7 @@ async function resolveVar(
     throw new Error(`No value or formula found for: ${varIri}`);
   }
 
-  const { expression, variables, intermediateWarnings } = await buildExprWithWarnings(formulaIri, endpoint, collectedWarnings);
+  const { expression, variables } = await buildExprWithWarnings(formulaIri, endpoint, checkContext);
   const withValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => {
     if (variables[name] !== undefined) return variables[name].toString();
     throw new Error(`Missing value: ${name}`);
@@ -95,11 +286,12 @@ async function resolveVar(
   // Check restrictions for this intermediate result
   const dataElementUri = await getDataElementForVar(varIri, endpoint);
   if (dataElementUri) {
-    const { warnings } = await checkRestrictions(dataElementUri, result, endpoint);
+    const { warnings, checkedCount } = await checkRestrictions(dataElementUri, result, endpoint);
+    checkContext.checkedCount += checkedCount;
     for (const w of warnings) {
       const varName = varIri.replace(/^.*[\/#]/, '');
       w.message = `[Intermediate: ${varName}] ${w.message}`;
-      collectedWarnings.push(w);
+      checkContext.warnings.push(w);
     }
   }
 
@@ -134,8 +326,8 @@ export async function evaluateByProcess(
   const formulaUri = await findFormula(processUri, outputUri, endpoint);
 
   // Use buildExprWithWarnings to collect intermediate warnings
-  const collectedWarnings: RestrictionWarning[] = [];
-  const { expression, variables, intermediateWarnings } = await buildExprWithWarnings(formulaUri, endpoint, collectedWarnings);
+  const checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0 };
+  const { expression, variables } = await buildExprWithWarnings(formulaUri, endpoint, checkContext);
 
   const withValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => {
     if (variables[name] !== undefined) return variables[name].toString();
@@ -146,9 +338,9 @@ export async function evaluateByProcess(
 
   if (doCheckRestrictions) {
     // Check final output restrictions
-    const { warnings: finalWarnings, checkedCount } = await checkRestrictions(outputUri, result, endpoint);
-    const allWarnings = [...intermediateWarnings, ...finalWarnings];
-    const totalChecked = checkedCount + intermediateWarnings.length;
+    const { warnings: finalWarnings, checkedCount: finalCheckedCount } = await checkRestrictions(outputUri, result, endpoint);
+    const allWarnings = [...checkContext.warnings, ...finalWarnings];
+    const totalChecked = checkContext.checkedCount + finalCheckedCount;
     return { expression: withValues, result, warnings: allWarnings, restrictionsChecked: totalChecked };
   }
 
@@ -180,10 +372,11 @@ SELECT ?formula WHERE {
  * Evaluate a formula by its URI
  * @param formulaUri URI of the formula
  * @param endpoint SPARQL endpoint
- * @returns Expression and calculated result
+ * @returns Expression, calculated result, intermediate warnings and check count
  */
-export async function evaluateFormula(formulaUri: string, endpoint: string): Promise<{ expression: string, result: number }> {
-  const { expression, variables } = await buildExpr(formulaUri, endpoint);
+export async function evaluateFormula(formulaUri: string, endpoint: string): Promise<{ expression: string, result: number, intermediateWarnings: RestrictionWarning[], intermediateCheckedCount: number }> {
+  const checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0 };
+  const { expression, variables } = await buildExprWithWarnings(formulaUri, endpoint, checkContext);
 
   const withValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => {
     if (variables[name] !== undefined) return variables[name].toString();
@@ -191,27 +384,32 @@ export async function evaluateFormula(formulaUri: string, endpoint: string): Pro
   });
 
   const result = evaluate(withValues);
-  return { expression: withValues, result };
+  return { expression: withValues, result, intermediateWarnings: checkContext.warnings, intermediateCheckedCount: checkContext.checkedCount };
 }
 
 async function buildExprWithWarnings(
   nodeUri: string,
   endpoint: string,
-  collectedWarnings: RestrictionWarning[] = []
-): Promise<{ expression: string, variables: Record<string, number>, intermediateWarnings: RestrictionWarning[] }> {
-  return buildExprInternal(nodeUri, endpoint, collectedWarnings);
+  checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0 }
+): Promise<{ expression: string, variables: Record<string, number>, checkContext: IntermediateCheckContext }> {
+  // Load formula graph and use in-memory traversal (handles blank nodes correctly)
+  const store = await loadFormulaGraph(nodeUri, endpoint);
+  const result = await buildExprFromGraph(store, nodeUri, endpoint, checkContext);
+  return { ...result, checkContext };
 }
 
 async function buildExpr(nodeUri: string, endpoint: string): Promise<{ expression: string, variables: Record<string, number> }> {
-  const result = await buildExprInternal(nodeUri, endpoint, []);
-  return { expression: result.expression, variables: result.variables };
+  // Load formula graph and use in-memory traversal (handles blank nodes correctly)
+  const store = await loadFormulaGraph(nodeUri, endpoint);
+  const emptyContext: IntermediateCheckContext = { warnings: [], checkedCount: 0 };
+  return buildExprFromGraph(store, nodeUri, endpoint, emptyContext);
 }
 
 async function buildExprInternal(
   nodeUri: string,
   endpoint: string,
-  collectedWarnings: RestrictionWarning[]
-): Promise<{ expression: string, variables: Record<string, number>, intermediateWarnings: RestrictionWarning[] }> {
+  checkContext: IntermediateCheckContext
+): Promise<{ expression: string, variables: Record<string, number> }> {
   const opQuery = `
 PREFIX om: <${OM('').value}>
 SELECT ?op WHERE { ${sparqlTerm(nodeUri)} om:operator ?op } LIMIT 1`;
@@ -230,7 +428,7 @@ SELECT ?rhs WHERE {
     const rhsRes = await runSelectQuery(rhsQuery, endpoint);
     const b = rhsRes.results.bindings[0].rhs;
     const rhsNode = b.type === 'bnode' ? `_:${b.value}` : b.value;
-    return await buildExprInternal(rhsNode, endpoint, collectedWarnings);
+    return await buildExprInternal(rhsNode, endpoint, checkContext);
   }
 
   const args = await getArgs(nodeUri, endpoint);
@@ -277,15 +475,15 @@ SELECT ?val ?name WHERE {
         parts.push(b.name.value);
         continue;
       }
-      
-const name = argUri.replace(/^.*[\/#]/, '');
-const val = await resolveVar(argUri, endpoint, new Set(), collectedWarnings);     
-vars[name] = val;                       
-parts.push(name);
-continue;
+
+      const name = argUri.replace(/^.*[\/#]/, '');
+      const val = await resolveVar(argUri, endpoint, new Set(), checkContext);
+      vars[name] = val;
+      parts.push(name);
+      continue;
 
     } else if (types.includes(OM('Application').value)) {
-      const nested = await buildExprInternal(argUri, endpoint, collectedWarnings);
+      const nested = await buildExprInternal(argUri, endpoint, checkContext);
       Object.assign(vars, nested.variables);
       if (!seen.has(nested.expression)) {
         parts.push(`(${nested.expression})`);
@@ -302,7 +500,7 @@ continue;
     ? `${op.symbol}(${parts.join(', ')})`
     : parts.join(` ${op.symbol} `);
 
-  return { expression: expr, variables: vars, intermediateWarnings: collectedWarnings };
+  return { expression: expr, variables: vars };
 }
 
 async function getArgs(nodeUri: string, endpoint: string): Promise<Node[]> {

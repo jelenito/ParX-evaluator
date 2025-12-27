@@ -43,15 +43,20 @@ Example:
     console.log('Evaluated Expression:', result.expression);
     console.log('Calculation-Result:', result.result);
 
-    // Check restrictions
-    const { warnings, checkedCount } = await checkRestrictions(outputDataElement, result.result, endpoint);
-    if (warnings.length > 0) {
-      console.log(`\n⚠️  Restriction Warnings (checked ${checkedCount}):`);
-      for (const w of warnings) {
+    // Check restrictions on final output
+    const { warnings: finalWarnings, checkedCount: finalCheckedCount } = await checkRestrictions(outputDataElement, result.result, endpoint);
+
+    // Combine intermediate and final warnings/counts
+    const allWarnings = [...result.intermediateWarnings, ...finalWarnings];
+    const totalChecked = result.intermediateCheckedCount + finalCheckedCount;
+
+    if (allWarnings.length > 0) {
+      console.log(`\n⚠️  Restriction Warnings (checked ${totalChecked}):`);
+      for (const w of allWarnings) {
         console.log(`   - ${w.message}`);
       }
     } else {
-      console.log(`✓ No restriction violations. Checked ${checkedCount} restrictions.`);
+      console.log(`✓ No restriction violations. Checked ${totalChecked} restrictions.`);
     }
   } catch (e) {
     console.error(' Error:', e);

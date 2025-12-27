@@ -1,5 +1,5 @@
 import { runSelectQuery } from './sparqlClient';
-import { PARX, VDI3682, OM } from './namespaces';
+import { PARX, VDI3682, OM, RDF } from './namespaces';
 
 /**
  * Find formula for given process and output data element
@@ -17,6 +17,7 @@ export async function findFormulaForOutput(
 PREFIX ParX: <${PARX('').value}>
 PREFIX VDI3682: <${VDI3682('').value}>
 PREFIX om: <${OM('').value}>
+PREFIX rdf: <${RDF('').value}>
 
 SELECT ?formula WHERE {
   <${processUri}> ParX:hasInterdependency ?formula .
