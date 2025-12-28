@@ -300,6 +300,117 @@ async function resolveVar(
 
 
 /**
+ * Result of symbolic formula expression (without evaluation)
+ */
+export interface FormulaExpressionResult {
+  expression: string;
+  outputVar: string;
+}
+
+/**
+ * Get the symbolic expression of a formula without evaluating it
+ * @param formulaUri - The IRI of the formula (Interdependency)
+ * @param sparqlEndpoint - The SPARQL endpoint URL
+ * @returns The formula expression as a string (e.g., "V = l * w * h") and output variable URI
+ */
+export async function getFormulaExpression(
+  formulaUri: string,
+  sparqlEndpoint: string
+): Promise<FormulaExpressionResult> {
+  const store = await loadFormulaGraph(formulaUri, sparqlEndpoint);
+
+  // Get the output variable (LHS of equation)
+  const outputVar = getOutputVarFromGraph(store, formulaUri);
+  const outputVarName = outputVar.replace(/^.*[\/#]/, '');
+
+  // Build symbolic expression (RHS only)
+  const rhsExpr = await buildSymbolicExpr(store, formulaUri);
+
+  return {
+    expression: `${outputVarName} = ${rhsExpr}`,
+    outputVar
+  };
+}
+
+/**
+ * Get the output variable (LHS) from an equation in the graph
+ */
+function getOutputVarFromGraph(store: any, formulaUri: string): string {
+  const node = formulaUri.startsWith('_:')
+    ? store.bnode(formulaUri.substring(2))
+    : store.sym(formulaUri);
+
+  const opPred = store.sym(OM('operator').value);
+  const opStmts = store.statementsMatching(node, opPred, null);
+
+  if (opStmts.length === 0 || !opStmts[0].object.value.endsWith('#eq')) {
+    throw new Error('Formula must be an equation (om:operator = relation1#eq)');
+  }
+
+  const args = getArgsFromGraph(store, formulaUri);
+  if (args.length < 1) {
+    throw new Error('Equation must have at least one argument (LHS)');
+  }
+
+  return args[0].value;
+}
+
+/**
+ * Build symbolic expression from graph without resolving variable values
+ */
+async function buildSymbolicExpr(store: any, nodeUri: string): Promise<string> {
+  const opUri = getOperatorFromGraph(store, nodeUri);
+  if (!opUri) {
+    throw new Error(`No operator found for node: ${nodeUri}`);
+  }
+
+  // Handle equality - get RHS
+  if (opUri.endsWith('#eq')) {
+    const args = getArgsFromGraph(store, nodeUri);
+    if (args.length < 2) {
+      throw new Error('Equality requires 2 arguments');
+    }
+    const rhsNode = args[1];
+    const rhsUri = rhsNode.termType === 'BlankNode' ? `_:${rhsNode.value}` : rhsNode.value;
+    return buildSymbolicExpr(store, rhsUri);
+  }
+
+  const args = getArgsFromGraph(store, nodeUri);
+  const parts: string[] = [];
+
+  for (const arg of args) {
+    // Literal value
+    if (arg.termType === 'Literal') {
+      parts.push(arg.value);
+      continue;
+    }
+
+    const argUri = arg.termType === 'BlankNode' ? `_:${arg.value}` : arg.value;
+
+    // Check if it's an Application (nested formula)
+    if (isApplication(store, arg)) {
+      const nested = await buildSymbolicExpr(store, argUri);
+      parts.push(`(${nested})`);
+      continue;
+    }
+
+    // Variable - just use the name
+    if (isVariable(store, arg) || arg.termType === 'NamedNode') {
+      const name = arg.value.replace(/^.*[\/#]/, '');
+      parts.push(name);
+      continue;
+    }
+
+    throw new Error(`Unknown argument type: ${arg.termType}`);
+  }
+
+  const op = getOperator(opUri);
+  return op.arity === 1
+    ? `${op.symbol}(${parts.join(', ')})`
+    : parts.join(` ${op.symbol} `);
+}
+
+/**
  * Result of formula evaluation including optional restriction warnings
  */
 export interface EvaluationResult {
