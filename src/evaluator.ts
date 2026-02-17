@@ -155,7 +155,6 @@ async function buildExprFromGraph(
   const args = getArgsFromGraph(store, nodeUri);
   const vars: Record<string, number> = {};
   const parts: string[] = [];
-  const seen = new Set<string>();
 
   for (const arg of args) {
     // Literal value
@@ -170,10 +169,7 @@ async function buildExprFromGraph(
     if (isApplication(store, arg)) {
       const nested = await buildExprFromGraph(store, argUri, endpoint, checkContext);
       Object.assign(vars, nested.variables);
-      if (!seen.has(nested.expression)) {
-        parts.push(`(${nested.expression})`);
-        seen.add(nested.expression);
-      }
+      parts.push(`(${nested.expression})`);
       continue;
     }
 
@@ -182,10 +178,18 @@ async function buildExprFromGraph(
       const varIri = arg.value;
       const name = varIri.replace(/^.*[\/#]/, '');
 
+      // Check cache first
+      if (checkContext.resolvedVars.has(varIri)) {
+        vars[name] = checkContext.resolvedVars.get(varIri)!;
+        parts.push(name);
+        continue;
+      }
+
       // Try to get direct value
       const direct = await getVarValue(varIri, endpoint);
       if (direct !== null) {
         vars[name] = direct;
+        checkContext.resolvedVars.set(varIri, direct);
         parts.push(name);
         continue;
       }
@@ -193,6 +197,7 @@ async function buildExprFromGraph(
       // Try to resolve via formula
       const val = await resolveVar(varIri, endpoint, new Set(), checkContext);
       vars[name] = val;
+      checkContext.resolvedVars.set(varIri, val);
       parts.push(name);
       continue;
     }
@@ -255,21 +260,30 @@ async function findFormulaForVar(varIri: string, endpoint: string): Promise<stri
 interface IntermediateCheckContext {
   warnings: RestrictionWarning[];
   checkedCount: number;
+  resolvedVars: Map<string, number>;
 }
 
 async function resolveVar(
   varIri: string,
   endpoint: string,
   visited: Set<string> = new Set(),
-  checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0 }
+  checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0, resolvedVars: new Map() }
 ): Promise<number> {
+  // Return cached value if already resolved
+  if (checkContext.resolvedVars.has(varIri)) {
+    return checkContext.resolvedVars.get(varIri)!;
+  }
+
   if (visited.has(varIri)) {
     throw new Error(`Cyclic dependency detected: ${varIri}`);
   }
   visited.add(varIri);
 
   const direct = await getVarValue(varIri, endpoint);
-  if (direct !== null) return direct;
+  if (direct !== null) {
+    checkContext.resolvedVars.set(varIri, direct);
+    return direct;
+  }
 
   const formulaIri = await findFormulaForVar(varIri, endpoint);
   if (!formulaIri) {
@@ -282,6 +296,9 @@ async function resolveVar(
     throw new Error(`Missing value: ${name}`);
   });
   const result = Number(evaluate(withValues));
+
+  // Cache the resolved value
+  checkContext.resolvedVars.set(varIri, result);
 
   // Check restrictions for this intermediate result
   const dataElementUri = await getDataElementForVar(varIri, endpoint);
@@ -437,7 +454,7 @@ export async function evaluateByProcess(
   const formulaUri = await findFormula(processUri, outputUri, endpoint);
 
   // Use buildExprWithWarnings to collect intermediate warnings
-  const checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0 };
+  const checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0, resolvedVars: new Map() };
   const { expression, variables } = await buildExprWithWarnings(formulaUri, endpoint, checkContext);
 
   const withValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => {
@@ -486,7 +503,7 @@ SELECT ?formula WHERE {
  * @returns Expression, calculated result, intermediate warnings and check count
  */
 export async function evaluateFormula(formulaUri: string, endpoint: string): Promise<{ expression: string, result: number, intermediateWarnings: RestrictionWarning[], intermediateCheckedCount: number }> {
-  const checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0 };
+  const checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0, resolvedVars: new Map() };
   const { expression, variables } = await buildExprWithWarnings(formulaUri, endpoint, checkContext);
 
   const withValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => {
@@ -501,7 +518,7 @@ export async function evaluateFormula(formulaUri: string, endpoint: string): Pro
 async function buildExprWithWarnings(
   nodeUri: string,
   endpoint: string,
-  checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0 }
+  checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0, resolvedVars: new Map() }
 ): Promise<{ expression: string, variables: Record<string, number>, checkContext: IntermediateCheckContext }> {
   // Load formula graph and use in-memory traversal (handles blank nodes correctly)
   const store = await loadFormulaGraph(nodeUri, endpoint);
