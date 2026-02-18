@@ -155,7 +155,6 @@ async function buildExprFromGraph(
   const args = getArgsFromGraph(store, nodeUri);
   const vars: Record<string, number> = {};
   const parts: string[] = [];
-  const seen = new Set<string>();
 
   for (const arg of args) {
     // Literal value
@@ -170,10 +169,7 @@ async function buildExprFromGraph(
     if (isApplication(store, arg)) {
       const nested = await buildExprFromGraph(store, argUri, endpoint, checkContext);
       Object.assign(vars, nested.variables);
-      if (!seen.has(nested.expression)) {
-        parts.push(`(${nested.expression})`);
-        seen.add(nested.expression);
-      }
+      parts.push(`(${nested.expression})`);
       continue;
     }
 
@@ -182,10 +178,18 @@ async function buildExprFromGraph(
       const varIri = arg.value;
       const name = varIri.replace(/^.*[\/#]/, '');
 
+      // Check cache first
+      if (checkContext.resolvedVars.has(varIri)) {
+        vars[name] = checkContext.resolvedVars.get(varIri)!;
+        parts.push(name);
+        continue;
+      }
+
       // Try to get direct value
       const direct = await getVarValue(varIri, endpoint);
       if (direct !== null) {
         vars[name] = direct;
+        checkContext.resolvedVars.set(varIri, direct);
         parts.push(name);
         continue;
       }
@@ -193,6 +197,7 @@ async function buildExprFromGraph(
       // Try to resolve via formula
       const val = await resolveVar(varIri, endpoint, new Set(), checkContext);
       vars[name] = val;
+      checkContext.resolvedVars.set(varIri, val);
       parts.push(name);
       continue;
     }
@@ -255,21 +260,30 @@ async function findFormulaForVar(varIri: string, endpoint: string): Promise<stri
 interface IntermediateCheckContext {
   warnings: RestrictionWarning[];
   checkedCount: number;
+  resolvedVars: Map<string, number>;
 }
 
 async function resolveVar(
   varIri: string,
   endpoint: string,
   visited: Set<string> = new Set(),
-  checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0 }
+  checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0, resolvedVars: new Map() }
 ): Promise<number> {
+  // Return cached value if already resolved
+  if (checkContext.resolvedVars.has(varIri)) {
+    return checkContext.resolvedVars.get(varIri)!;
+  }
+
   if (visited.has(varIri)) {
     throw new Error(`Cyclic dependency detected: ${varIri}`);
   }
   visited.add(varIri);
 
   const direct = await getVarValue(varIri, endpoint);
-  if (direct !== null) return direct;
+  if (direct !== null) {
+    checkContext.resolvedVars.set(varIri, direct);
+    return direct;
+  }
 
   const formulaIri = await findFormulaForVar(varIri, endpoint);
   if (!formulaIri) {
@@ -282,6 +296,9 @@ async function resolveVar(
     throw new Error(`Missing value: ${name}`);
   });
   const result = Number(evaluate(withValues));
+
+  // Cache the resolved value
+  checkContext.resolvedVars.set(varIri, result);
 
   // Check restrictions for this intermediate result
   const dataElementUri = await getDataElementForVar(varIri, endpoint);
@@ -298,6 +315,117 @@ async function resolveVar(
   return result;
 }
 
+
+/**
+ * Result of symbolic formula expression (without evaluation)
+ */
+export interface FormulaExpressionResult {
+  expression: string;
+  outputVar: string;
+}
+
+/**
+ * Get the symbolic expression of a formula without evaluating it
+ * @param formulaUri - The IRI of the formula (Interdependency)
+ * @param sparqlEndpoint - The SPARQL endpoint URL
+ * @returns The formula expression as a string (e.g., "V = l * w * h") and output variable URI
+ */
+export async function getFormulaExpression(
+  formulaUri: string,
+  sparqlEndpoint: string
+): Promise<FormulaExpressionResult> {
+  const store = await loadFormulaGraph(formulaUri, sparqlEndpoint);
+
+  // Get the output variable (LHS of equation)
+  const outputVar = getOutputVarFromGraph(store, formulaUri);
+  const outputVarName = outputVar.replace(/^.*[\/#]/, '');
+
+  // Build symbolic expression (RHS only)
+  const rhsExpr = await buildSymbolicExpr(store, formulaUri);
+
+  return {
+    expression: `${outputVarName} = ${rhsExpr}`,
+    outputVar
+  };
+}
+
+/**
+ * Get the output variable (LHS) from an equation in the graph
+ */
+function getOutputVarFromGraph(store: any, formulaUri: string): string {
+  const node = formulaUri.startsWith('_:')
+    ? store.bnode(formulaUri.substring(2))
+    : store.sym(formulaUri);
+
+  const opPred = store.sym(OM('operator').value);
+  const opStmts = store.statementsMatching(node, opPred, null);
+
+  if (opStmts.length === 0 || !opStmts[0].object.value.endsWith('#eq')) {
+    throw new Error('Formula must be an equation (om:operator = relation1#eq)');
+  }
+
+  const args = getArgsFromGraph(store, formulaUri);
+  if (args.length < 1) {
+    throw new Error('Equation must have at least one argument (LHS)');
+  }
+
+  return args[0].value;
+}
+
+/**
+ * Build symbolic expression from graph without resolving variable values
+ */
+async function buildSymbolicExpr(store: any, nodeUri: string): Promise<string> {
+  const opUri = getOperatorFromGraph(store, nodeUri);
+  if (!opUri) {
+    throw new Error(`No operator found for node: ${nodeUri}`);
+  }
+
+  // Handle equality - get RHS
+  if (opUri.endsWith('#eq')) {
+    const args = getArgsFromGraph(store, nodeUri);
+    if (args.length < 2) {
+      throw new Error('Equality requires 2 arguments');
+    }
+    const rhsNode = args[1];
+    const rhsUri = rhsNode.termType === 'BlankNode' ? `_:${rhsNode.value}` : rhsNode.value;
+    return buildSymbolicExpr(store, rhsUri);
+  }
+
+  const args = getArgsFromGraph(store, nodeUri);
+  const parts: string[] = [];
+
+  for (const arg of args) {
+    // Literal value
+    if (arg.termType === 'Literal') {
+      parts.push(arg.value);
+      continue;
+    }
+
+    const argUri = arg.termType === 'BlankNode' ? `_:${arg.value}` : arg.value;
+
+    // Check if it's an Application (nested formula)
+    if (isApplication(store, arg)) {
+      const nested = await buildSymbolicExpr(store, argUri);
+      parts.push(`(${nested})`);
+      continue;
+    }
+
+    // Variable - just use the name
+    if (isVariable(store, arg) || arg.termType === 'NamedNode') {
+      const name = arg.value.replace(/^.*[\/#]/, '');
+      parts.push(name);
+      continue;
+    }
+
+    throw new Error(`Unknown argument type: ${arg.termType}`);
+  }
+
+  const op = getOperator(opUri);
+  return op.arity === 1
+    ? `${op.symbol}(${parts.join(', ')})`
+    : parts.join(` ${op.symbol} `);
+}
 
 /**
  * Result of formula evaluation including optional restriction warnings
@@ -326,7 +454,7 @@ export async function evaluateByProcess(
   const formulaUri = await findFormula(processUri, outputUri, endpoint);
 
   // Use buildExprWithWarnings to collect intermediate warnings
-  const checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0 };
+  const checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0, resolvedVars: new Map() };
   const { expression, variables } = await buildExprWithWarnings(formulaUri, endpoint, checkContext);
 
   const withValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => {
@@ -375,7 +503,7 @@ SELECT ?formula WHERE {
  * @returns Expression, calculated result, intermediate warnings and check count
  */
 export async function evaluateFormula(formulaUri: string, endpoint: string): Promise<{ expression: string, result: number, intermediateWarnings: RestrictionWarning[], intermediateCheckedCount: number }> {
-  const checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0 };
+  const checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0, resolvedVars: new Map() };
   const { expression, variables } = await buildExprWithWarnings(formulaUri, endpoint, checkContext);
 
   const withValues = expression.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, name => {
@@ -390,7 +518,7 @@ export async function evaluateFormula(formulaUri: string, endpoint: string): Pro
 async function buildExprWithWarnings(
   nodeUri: string,
   endpoint: string,
-  checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0 }
+  checkContext: IntermediateCheckContext = { warnings: [], checkedCount: 0, resolvedVars: new Map() }
 ): Promise<{ expression: string, variables: Record<string, number>, checkContext: IntermediateCheckContext }> {
   // Load formula graph and use in-memory traversal (handles blank nodes correctly)
   const store = await loadFormulaGraph(nodeUri, endpoint);
@@ -398,145 +526,6 @@ async function buildExprWithWarnings(
   return { ...result, checkContext };
 }
 
-async function buildExpr(nodeUri: string, endpoint: string): Promise<{ expression: string, variables: Record<string, number> }> {
-  // Load formula graph and use in-memory traversal (handles blank nodes correctly)
-  const store = await loadFormulaGraph(nodeUri, endpoint);
-  const emptyContext: IntermediateCheckContext = { warnings: [], checkedCount: 0 };
-  return buildExprFromGraph(store, nodeUri, endpoint, emptyContext);
-}
-
-async function buildExprInternal(
-  nodeUri: string,
-  endpoint: string,
-  checkContext: IntermediateCheckContext
-): Promise<{ expression: string, variables: Record<string, number> }> {
-  const opQuery = `
-PREFIX om: <${OM('').value}>
-SELECT ?op WHERE { ${sparqlTerm(nodeUri)} om:operator ?op } LIMIT 1`;
-  const opRes = await runSelectQuery(opQuery, endpoint);
-  const opUri = opRes.results.bindings[0].op.value;
-
-  if (opUri.endsWith('#eq')) {
-    const rhsQuery = `
-PREFIX om: <${OM('').value}>
-PREFIX rdf: <${RDF('').value}>
-SELECT ?rhs WHERE {
-   ${sparqlTerm(nodeUri)} om:arguments ?args .
-  ?args rdf:rest ?tail .
-  ?tail rdf:first ?rhs .
-}`;
-    const rhsRes = await runSelectQuery(rhsQuery, endpoint);
-    const b = rhsRes.results.bindings[0].rhs;
-    const rhsNode = b.type === 'bnode' ? `_:${b.value}` : b.value;
-    return await buildExprInternal(rhsNode, endpoint, checkContext);
-  }
-
-  const args = await getArgs(nodeUri, endpoint);
-  const vars: Record<string, number> = {};
-  const parts: string[] = [];
-  const seen = new Set<string>();
-
-  for (const arg of args) {
-    if (arg.termType === 'Literal') {
-      parts.push((arg as Literal).value);
-      continue;
-    }
-
-    if (arg.termType !== 'NamedNode') {
-      throw new Error(`Unsupported node type: ${arg.termType}`);
-    }
-
-    const argUri = (arg as NamedNode).value;
-
-    const typeQuery = `
-PREFIX om: <${OM('').value}>
-SELECT ?type WHERE { ${sparqlTerm(argUri)} a ?type }`;
-    const typeRes = await runSelectQuery(typeQuery, endpoint);
-    const types = typeRes.results.bindings.map((b: any) => b.type.value);
-
-    if (types.includes(OM('Variable').value) && !types.includes(OM('Application').value)) {
-      const valQuery = `
-PREFIX ParX: <${PARX('').value}>
-PREFIX DINEN61360: <${DINEN61360('').value}>
-PREFIX om: <${OM('').value}>
-
-SELECT ?val ?name WHERE {
-  ${sparqlTerm(argUri)} a om:Variable .
-  BIND(REPLACE(STR(${sparqlTerm(argUri)}), ".*[#/](.+)$", "$1") AS ?name)
-  ?de ParX:isDataFor ${sparqlTerm(argUri)} ;
-      DINEN61360:has_Instance_Description ?desc .
-  ?desc DINEN61360:Value ?val .
-} LIMIT 1`;
-
-      const valRes = await runSelectQuery(valQuery, endpoint);
-      if (valRes.results.bindings.length > 0) {
-        const b: any = valRes.results.bindings[0];
-        vars[b.name.value] = parseFloat(b.val.value);
-        parts.push(b.name.value);
-        continue;
-      }
-
-      const name = argUri.replace(/^.*[\/#]/, '');
-      const val = await resolveVar(argUri, endpoint, new Set(), checkContext);
-      vars[name] = val;
-      parts.push(name);
-      continue;
-
-    } else if (types.includes(OM('Application').value)) {
-      const nested = await buildExprInternal(argUri, endpoint, checkContext);
-      Object.assign(vars, nested.variables);
-      if (!seen.has(nested.expression)) {
-        parts.push(`(${nested.expression})`);
-        seen.add(nested.expression);
-      }
-      continue;
-    }
-
-    throw new Error(`Unknown type: ${argUri}`);
-  }
-
-  const op = getOperator(opUri);
-  const expr = op.arity === 1
-    ? `${op.symbol}(${parts.join(', ')})`
-    : parts.join(` ${op.symbol} `);
-
-  return { expression: expr, variables: vars };
-}
-
-async function getArgs(nodeUri: string, endpoint: string): Promise<Node[]> {
-  const firstQ = `
-PREFIX om: <${OM('').value}>
-PREFIX rdf: <${RDF('').value}>
-SELECT ?arg WHERE {
-  ${sparqlTerm(nodeUri)} om:arguments/rdf:first ?arg .
-}`;
-
-  const firstRes = await runSelectQuery(firstQ, endpoint);
-  const first = firstRes.results.bindings[0]?.arg;
-  
-  if (!first) return [];
-  
-  const secondQ = `
-PREFIX om: <${OM('').value}>
-PREFIX rdf: <${RDF('').value}>
-SELECT ?arg WHERE {
-  ${sparqlTerm(nodeUri)} om:arguments/rdf:rest/rdf:first ?arg .
-}`;
-
-  const secondRes = await runSelectQuery(secondQ, endpoint);
-  const second = secondRes.results.bindings[0]?.arg;
-  
-  const args = [first];
-  if (second) args.push(second);
-  
-  return args.map((b: any) => {
-    if (b.type === 'literal') {
-      return { termType: 'Literal', value: b.value } as Literal;
-    }
-    const val = b.type === 'bnode' ? `_:${b.value}` : b.value;
-    return { termType: 'NamedNode', value: val } as NamedNode;
-  });
-}
 const OP_MAP: Record<string, { symbol: string; arity: 1 | 2 }> = {
   
   'http://www.openmath.org/cd/arith1#plus':   { symbol: '+', arity: 2 },

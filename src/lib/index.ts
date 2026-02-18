@@ -6,13 +6,13 @@
  */
 
 // Main evaluation functions
-export { evaluateFormula, evaluateByProcess } from '../evaluator';
+export { evaluateFormula, evaluateByProcess, getFormulaExpression } from '../evaluator';
 
 // Restriction checking
 export { checkRestrictions } from '../evaluator';
 
 // Types
-export type { EvaluationResult, RestrictionWarning, RestrictionCheckResult } from '../evaluator';
+export type { EvaluationResult, RestrictionWarning, RestrictionCheckResult, FormulaExpressionResult } from '../evaluator';
 
 // Formula resolution
 export { findFormulaForOutput } from '../formulaResolver';
