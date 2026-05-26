@@ -17,7 +17,11 @@ npx ts-node src/index.ts {$graphRepo} {$processURI} {$parameterURI}
 - **`$parameterURI`** – IRI of the parameter to be evaluated.
 
 This will:
-1. Retrieve the formula for the specified parameter.
+1. Retrieve the formula for the specified parameter. The lookup first tries a
+   direct attachment of the formula to the given process. If none is found, it
+   walks the VDI 3682 decomposition (`consistsOf+`) and picks the sub-process
+   that produces the same state (linked to the data element via
+   `DINEN61360:has_Data_Element`).
 2. Traverse the `OpenMath-RDF` expression tree.
 3. Bind data elements and retrieve values.
 4. (In case of missing values) Recursively resolve any missing values from upstream processes.
